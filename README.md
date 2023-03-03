@@ -7,5 +7,5 @@ It only uses Rust **standard** library for the TCP stack with a thread pool impl
 concurrent message processing.
 
 ## Current Status
-The project is not a library. It is an executable binary that can listen to an Vertx Eventbus
-that can register an **address** and listen incoming messages.
+The project is not a library. It is an executable binary that can register to an Vertx Eventbus
+(hosted in port 7000) **address** and listen incoming messages.
