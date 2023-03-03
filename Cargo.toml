@@ -1,0 +1,16 @@
+[package]
+name = "vertx-tcp-eventbus-bridge"
+version = "0.1.0"
+edition = "2021"
+
+[profile.release]
+lto = true
+opt-level = 's'
+codegen-units = 1
+debug = false
+debug-assertions = false
+
+[dependencies]
+bytes = "1.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
