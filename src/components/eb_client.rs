@@ -5,8 +5,9 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{Read, Result, Write};
 use std::net::{SocketAddr, TcpStream};
+use std::sync::Arc;
 
-type Handler = Box<dyn FnOnce() + Send + 'static>;
+type Handler = Arc<dyn Fn(Value) + Send + Sync + 'static>;
 
 pub struct EventBusClient {
     read_stream: TcpStream,
@@ -24,10 +25,11 @@ impl EventBusClient {
     pub fn new(socket: SocketAddr, worker_count: usize) -> Result<Self> {
         let read_stream = TcpStream::connect(socket)?;
         let write_stream = read_stream.try_clone()?;
+        let handlers: HashMap<String, Handler> = HashMap::new();
         Ok(Self {
             read_stream,
             write_stream,
-            handlers: HashMap::new(),
+            handlers,
             thread_pool: ThreadPool::new(worker_count),
             state: ClientState::Connected,
         })
@@ -88,11 +90,14 @@ impl EventBusClient {
                         let mut packet_buffer = BytesMut::zeroed(content_length as usize);
                         match self.read_stream.read_exact(&mut packet_buffer) {
                             Ok(_) => {
-                                self.thread_pool.execute(move || {
-                                    let msg: InPacket =
-                                        serde_json::from_slice(&packet_buffer).unwrap();
-                                    println!("{msg:?}");
-                                });
+                                let msg: InPacket = serde_json::from_slice(&packet_buffer).unwrap();
+                                if let InPacket::Message(m) = msg {
+                                    let handler =
+                                        Arc::clone(self.handlers.get(&m.address).unwrap());
+                                    self.thread_pool.execute(move || {
+                                        handler(m.body.clone().unwrap());
+                                    });
+                                }
                             }
                             Err(_) => break,
                         }
@@ -143,7 +148,7 @@ enum OutPacket {
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
 #[serde(rename_all(serialize = "lowercase", deserialize = "lowercase"))]
 #[serde(tag = "type")]
-enum InPacket {
+pub enum InPacket {
     #[serde(rename = "err")]
     Error(Message),
     Message(Message),
