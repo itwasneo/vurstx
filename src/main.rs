@@ -20,11 +20,14 @@ fn main() -> Result<(), std::io::Error> {
                     println!("{msg:?}");
                 }),
             )?
-            // It doesn't start to process the messages until __start_listening__ is called.
+            // Client doesn't start to process the messages until __start_listening__ is called.
             .start_listening();
 
-        // __stop_listening__ is not working currently.
+        // After 10 seconds clint gets stopped.
+        std::thread::sleep(std::time::Duration::from_secs(3));
         eb_client.stop_listening();
+
+        std::thread::sleep(std::time::Duration::from_secs(120));
     };
     Ok(())
 }

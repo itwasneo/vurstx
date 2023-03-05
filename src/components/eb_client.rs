@@ -5,7 +5,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{Read, Result, Write};
 use std::net::{SocketAddr, TcpStream};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// Type representing the **handler** functions that process the incoming
 /// Message value.
@@ -17,13 +17,15 @@ type Handler = Arc<dyn Fn(Value) + Send + Sync + 'static>;
 /// Struct representing the TCP Client for the Vertx Eventbus Bridge.
 ///
 /// It keeps seperate TcpStream clones for its read and write operations.
-/// It keeps handler functions for corresponding **registered address** messages.
-/// It works with a thread pool to process the incoming messages.
+///
+/// It keeps handler functions for corresponding **registered address** messages in a HashMap. The
+/// key values of the HashMap are the **address**es and the values are the __Handler__ functions.
 pub struct EventBusClient {
     read_stream: TcpStream,
     write_stream: TcpStream,
-    handlers: HashMap<String, Handler>,
-    thread_pool: ThreadPool,
+    // Handlers HashMap should be stored behind Arc<Mutex> to be sent and modified between threads.
+    handlers: Arc<Mutex<HashMap<String, Handler>>>,
+    worker_count: usize,
     state: ClientState,
 }
 
@@ -35,12 +37,12 @@ impl EventBusClient {
     pub fn new(socket: SocketAddr, worker_count: usize) -> Result<Self> {
         let read_stream = TcpStream::connect(socket)?;
         let write_stream = read_stream.try_clone()?;
-        let handlers: HashMap<String, Handler> = HashMap::new();
+        let handlers = Arc::new(Mutex::new(HashMap::new()));
         Ok(Self {
             read_stream,
             write_stream,
             handlers,
-            thread_pool: ThreadPool::new(worker_count),
+            worker_count,
             state: ClientState::Connected,
         })
     }
@@ -58,7 +60,7 @@ impl EventBusClient {
             headers: None,
         })) {
             Ok(_) => {
-                self.handlers.insert(address, handler);
+                self.handlers.lock().unwrap().insert(address, handler);
                 Ok(self)
             }
             Err(e) => Err(e),
@@ -76,7 +78,7 @@ impl EventBusClient {
             headers: None,
         })) {
             Ok(_) => {
-                self.handlers.remove(&address);
+                self.handlers.lock().unwrap().remove(&address);
                 Ok(self)
             }
             Err(e) => Err(e),
@@ -86,50 +88,67 @@ impl EventBusClient {
     /// Starts __EventBusClient__ to listen incoming Event Bus messages belonging to the **address*es
     /// that are previously registered by the client.
     ///
-    /// As long as the **state** value of the __EventBusClient__ is **Listening**, the client keeps
-    /// listening to the Event Bus messages.
-    ///
-    /// IMPORTANT:
-    /// This is an obvious bug since the program stuck in the inner while loop in the main thread, it
-    /// can't be stopped via changing the ClientState.
+    /// It creates a thread pool which is reposible for processing incoming messages.
     pub fn start_listening(&mut self) {
         if self.state == ClientState::Connected {
             self.state = ClientState::Listening;
-            while self.state == ClientState::Listening {
-                let mut content_length_buffer = [0u8; 4];
-                match self.read_stream.read_exact(&mut content_length_buffer) {
-                    Ok(_) => {
-                        let content_length =
-                            u32::from_be_bytes(content_length_buffer.try_into().unwrap());
-                        let mut packet_buffer = BytesMut::zeroed(content_length as usize);
-                        match self.read_stream.read_exact(&mut packet_buffer) {
-                            Ok(_) => {
-                                // Here deserialization can not be sent to the thread pool due
-                                // to the fact that the **address** should be known to get the
-                                // right handler function. We can't send the **handlers** HashMap
-                                // to thread_pool.
-                                let msg: InPacket = serde_json::from_slice(&packet_buffer).unwrap();
-                                if let InPacket::Message(m) = msg {
-                                    let handler =
-                                        Arc::clone(self.handlers.get(&m.address).unwrap());
-                                    self.thread_pool.execute(move || {
-                                        handler(m.body.clone().unwrap());
-                                    });
+            let thread_pool = ThreadPool::new(self.worker_count);
+            let mut read_stream = self.read_stream.try_clone().unwrap();
+            let handlers = Arc::clone(&self.handlers);
+
+            // Here it spawns a new thread and sends the thread pool and a clone of __Handler__s
+            // HashMap into the closure. The loop inside the task can be broken by shutting down
+            // the TCP connection.
+            std::thread::spawn(move || {
+                loop {
+                    let mut content_length_buffer = [0u8; 4];
+                    match read_stream.read_exact(&mut content_length_buffer) {
+                        Ok(_) => {
+                            let content_length =
+                                u32::from_be_bytes(content_length_buffer.try_into().unwrap());
+                            let mut packet_buffer = BytesMut::zeroed(content_length as usize);
+                            match read_stream.read_exact(&mut packet_buffer) {
+                                Ok(_) => {
+                                    // Here deserialization can not be sent to the thread pool due
+                                    // to the fact that the **address** should be known to get the
+                                    // right handler function. We can't send the **handlers** HashMap
+                                    // to thread_pool.
+                                    let msg: InPacket =
+                                        serde_json::from_slice(&packet_buffer).unwrap();
+                                    if let InPacket::Message(m) = msg {
+                                        let handler = Arc::clone(
+                                            handlers.lock().unwrap().get(&m.address).unwrap(),
+                                        );
+                                        thread_pool.execute(move || {
+                                            handler(m.body.clone().unwrap());
+                                        });
+                                    }
                                 }
+                                Err(_e) => break,
                             }
-                            Err(_) => break,
                         }
+                        Err(_e) => break,
                     }
-                    Err(_) => break,
                 }
-            }
+            });
         }
     }
 
-    /// Stops __EventBusClient__ to listen incoming Event Bus messages entirely by changing the
-    /// client's **state** value.
+    /// Stops __EventBusClient__ to listen incoming Event Bus messages entirely by shutting down
+    /// the TCP connection. This makes the thread pool that reads the __read_stream__ fail and
+    /// break out from the infinite loop.
     pub fn stop_listening(&mut self) {
-        self.state = ClientState::Stopped;
+        if self.state == ClientState::Listening {
+            self.state = ClientState::Stopped;
+
+            // IMPORTANT:
+            // Care here. Right now this function closes the both read and write half of the TCP
+            // connection to prevent any connection error that can occur in the server side when
+            // the client is closed forecefully from the terminal. This should change when the
+            // graceful shutdown is implemented.
+            self.read_stream.shutdown(std::net::Shutdown::Both).unwrap();
+            println!("Stop Called");
+        }
     }
 
     /// Writes the given TCP packet to the **write_stream** of the __EventBusClient__.
@@ -182,7 +201,7 @@ struct Message {
 }
 
 /// Enum representing the possible __EventBusClient__ status.
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 enum ClientState {
     Connected,
     Listening,

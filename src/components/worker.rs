@@ -3,6 +3,7 @@ use std::thread;
 
 pub type Job = Box<dyn FnOnce() + Send + 'static>;
 
+#[derive(Debug)]
 pub struct Worker {
     pub id: usize,
     pub thread: Option<thread::JoinHandle<()>>,
@@ -14,13 +15,8 @@ impl Worker {
             let message = receiver.lock().unwrap().recv();
 
             match message {
-                Ok(job) => {
-                    println!("Worker {id} got a message; processing...");
-                    job();
-                }
-                Err(_) => {
-                    eprintln!("Worker {id} disconnected; shutting down...");
-                }
+                Ok(job) => job(),
+                Err(_) => {}
             }
         });
 

@@ -48,13 +48,12 @@ impl ThreadPool {
 
 impl Drop for ThreadPool {
     fn drop(&mut self) {
-        // This closes the channel
-        drop(self.sender.take());
-
         for worker in &mut self.workers {
             if let Some(thread) = worker.thread.take() {
                 thread.join().unwrap();
             }
         }
+        // This closes the channel
+        drop(self.sender.take());
     }
 }
