@@ -32,6 +32,7 @@ impl ThreadPool {
         }
     }
 
+    /// Send the **handler** function that processes the message value to its workers.
     pub fn execute<F>(&self, f: F)
     where
         F: FnOnce() + Send + 'static,

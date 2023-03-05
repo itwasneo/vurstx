@@ -7,8 +7,18 @@ use std::io::{Read, Result, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 
+/// Type representing the **handler** functions that process the incoming
+/// Message value.
+///
+/// __Handler__ is a function wrapped with an Arc pointer so that it could be cloned safely to send
+/// to other threads. It takes __serde_json::Value__ and return __nothing__.
 type Handler = Arc<dyn Fn(Value) + Send + Sync + 'static>;
 
+/// Struct representing the TCP Client for the Vertx Eventbus Bridge.
+///
+/// It keeps seperate TcpStream clones for its read and write operations.
+/// It keeps handler functions for corresponding **registered address** messages.
+/// It works with a thread pool to process the incoming messages.
 pub struct EventBusClient {
     read_stream: TcpStream,
     write_stream: TcpStream,
@@ -78,6 +88,10 @@ impl EventBusClient {
     ///
     /// As long as the **state** value of the __EventBusClient__ is **Listening**, the client keeps
     /// listening to the Event Bus messages.
+    ///
+    /// IMPORTANT:
+    /// This is an obvious bug since the program stuck in the inner while loop in the main thread, it
+    /// can't be stopped via changing the ClientState.
     pub fn start_listening(&mut self) {
         if self.state == ClientState::Connected {
             self.state = ClientState::Listening;
@@ -90,6 +104,10 @@ impl EventBusClient {
                         let mut packet_buffer = BytesMut::zeroed(content_length as usize);
                         match self.read_stream.read_exact(&mut packet_buffer) {
                             Ok(_) => {
+                                // Here deserialization can not be sent to the thread pool due
+                                // to the fact that the **address** should be known to get the
+                                // right handler function. We can't send the **handlers** HashMap
+                                // to thread_pool.
                                 let msg: InPacket = serde_json::from_slice(&packet_buffer).unwrap();
                                 if let InPacket::Message(m) = msg {
                                     let handler =
@@ -163,6 +181,7 @@ struct Message {
     headers: Option<HashMap<String, String>>,
 }
 
+/// Enum representing the possible __EventBusClient__ status.
 #[derive(PartialEq)]
 enum ClientState {
     Connected,
