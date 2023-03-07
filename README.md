@@ -11,7 +11,6 @@ The project is not a library. It is an executable binary that can register to an
 (hosted in port 7000) **address** and listen incoming messages.
 
 ## TODO
-- [ ] TLS support
 - [ ] no-std/mio(Metal I/O) support for resource constrainted environments
 - [ ] Additional message formats (protobuf, avro etc.) for better performance
 - [ ] Change it to a library.

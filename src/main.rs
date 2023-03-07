@@ -20,11 +20,27 @@ fn main() -> Result<(), std::io::Error> {
                     println!("{msg:?}");
                 }),
             )?
+            .register(
+                "home".to_owned(),
+                Arc::new(|msg: Value| {
+                    println!("{msg:?}");
+                }),
+            )?
+            .register(
+                "neo".to_owned(),
+                Arc::new(|msg: Value| {
+                    println!("{msg:?}");
+                }),
+            )?
             // Client doesn't start to process the messages until __start_listening__ is called.
             .start_listening();
 
         // After 10 seconds clint gets stopped.
-        std::thread::sleep(std::time::Duration::from_secs(3));
+        std::thread::sleep(std::time::Duration::from_secs(10));
+        eb_client.unregister("welcome".to_owned())?;
+        std::thread::sleep(std::time::Duration::from_secs(10));
+        eb_client.unregister_all();
+        std::thread::sleep(std::time::Duration::from_secs(20));
         eb_client.stop_listening();
 
         std::thread::sleep(std::time::Duration::from_secs(120));

@@ -47,6 +47,17 @@ impl EventBusClient {
         })
     }
 
+    /// Publishes the given JSON value as message to the given address
+    pub fn publish(&mut self, address: String, message: Value) {
+        self.write_packet(OutPacket::Publish(Message {
+            address,
+            body: Some(message),
+            headers: None,
+        }))
+        .map_err(|e| eprintln!("error occured: {e}"))
+        .unwrap();
+    }
+
     /// Registers the __EventBusClient__ to the given Event Bus **address**. This function
     /// also expects the **handler** function that will handle the Event Bus messages
     /// received specifically for the given **address**.
@@ -67,42 +78,9 @@ impl EventBusClient {
         }
     }
 
-    /// Unregisters the __EventBusClient__ from the given Event Bus **address**.
-    ///
-    /// # Mental Note:
-    /// You can think **address** as a **topic** name in a regular message queue.
-    pub fn unregister(&mut self, address: String) -> Result<&Self> {
-        match self.write_packet(OutPacket::Unregister(Message {
-            address: address.clone(),
-            body: None,
-            headers: None,
-        })) {
-            Ok(_) => {
-                self.handlers.lock().unwrap().remove(&address);
-                Ok(self)
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    // TODO:
-    // Implement unregister_all => this function will unregister the EventBusClient from all the
-    // registered **address**es
-
     /// Sends the given JSON value as message to the given address
     pub fn send(&mut self, address: String, message: Value) {
         self.write_packet(OutPacket::Send(Message {
-            address,
-            body: Some(message),
-            headers: None,
-        }))
-        .map_err(|e| eprintln!("error occured: {e}"))
-        .unwrap();
-    }
-
-    /// Publishes the given JSON value as message to the given address
-    pub fn publish(&mut self, address: String, message: Value) {
-        self.write_packet(OutPacket::Publish(Message {
             address,
             body: Some(message),
             headers: None,
@@ -150,17 +128,6 @@ impl EventBusClient {
                                         InPacket::Error(m) => eprintln!("{m:?}"),
                                         InPacket::Pong => println!("PONG"),
                                     }
-
-                                    let msg: InPacket =
-                                        serde_json::from_slice(&packet_buffer).unwrap();
-                                    if let InPacket::Message(m) = msg {
-                                        let handler = Arc::clone(
-                                            handlers.lock().unwrap().get(&m.address).unwrap(),
-                                        );
-                                        thread_pool.execute(move || {
-                                            handler(m.body.clone().unwrap());
-                                        });
-                                    }
                                 }
                                 Err(_e) => break,
                             }
@@ -187,6 +154,41 @@ impl EventBusClient {
             self.read_stream.shutdown(std::net::Shutdown::Both).unwrap();
             println!("Stop Called");
         }
+    }
+
+    /// Unregisters the __EventBusClient__ from the given Event Bus **address**.
+    ///
+    /// # Mental Note:
+    /// You can think **address** as a **topic** name in a regular message queue.
+    pub fn unregister(&mut self, address: String) -> Result<&Self> {
+        match self.write_packet(OutPacket::Unregister(Message {
+            address: address.clone(),
+            body: None,
+            headers: None,
+        })) {
+            Ok(_) => {
+                self.handlers.lock().unwrap().remove(&address);
+                Ok(self)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Unregisters the __EventBusClient__ from all registered **address**es.
+    /// It also clears the handlers HashMap.
+    pub fn unregister_all(&mut self) {
+        let mutex = Arc::clone(&self.handlers);
+        let mut handlers = mutex.lock().unwrap();
+        handlers.iter().for_each(|(k, _)| {
+            self.write_packet(OutPacket::Unregister(Message {
+                address: k.clone(),
+                body: None,
+                headers: None,
+            }))
+            .map_err(|e| eprintln!("error occured: {e}"))
+            .unwrap();
+        });
+        handlers.clear();
     }
 
     /// Writes the given TCP packet to the **write_stream** of the __EventBusClient__.
