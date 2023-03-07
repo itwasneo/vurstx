@@ -85,19 +85,45 @@ impl EventBusClient {
         }
     }
 
+    // TODO:
+    // Implement unregister_all => this function will unregister the EventBusClient from all the
+    // registered **address**es
+
+    /// Sends the given JSON value as message to the given address
+    pub fn send(&mut self, address: String, message: Value) {
+        self.write_packet(OutPacket::Send(Message {
+            address,
+            body: Some(message),
+            headers: None,
+        }))
+        .map_err(|e| eprintln!("error occured: {e}"))
+        .unwrap();
+    }
+
+    /// Publishes the given JSON value as message to the given address
+    pub fn publish(&mut self, address: String, message: Value) {
+        self.write_packet(OutPacket::Publish(Message {
+            address,
+            body: Some(message),
+            headers: None,
+        }))
+        .map_err(|e| eprintln!("error occured: {e}"))
+        .unwrap();
+    }
+
     /// Starts __EventBusClient__ to listen incoming Event Bus messages belonging to the **address*es
     /// that are previously registered by the client.
     ///
     /// It creates a thread pool which is reposible for processing incoming messages.
     pub fn start_listening(&mut self) {
-        if self.state == ClientState::Connected {
-            self.state = ClientState::Listening;
+        if let ClientState::Connected = &mut self.state {
+            *&mut self.state = ClientState::Listening;
             let thread_pool = ThreadPool::new(self.worker_count);
             let mut read_stream = self.read_stream.try_clone().unwrap();
             let handlers = Arc::clone(&self.handlers);
 
             // Here it spawns a new thread and sends the thread pool and a clone of __Handler__s
-            // HashMap into the closure. The loop inside the task can be broken by shutting down
+            // HashMap into the closure. The loop inside the closure can be broken by shutting down
             // the TCP connection.
             std::thread::spawn(move || {
                 loop {
@@ -110,9 +136,21 @@ impl EventBusClient {
                             match read_stream.read_exact(&mut packet_buffer) {
                                 Ok(_) => {
                                     // Here deserialization can not be sent to the thread pool due
-                                    // to the fact that the **address** should be known to get the
-                                    // right handler function. We can't send the **handlers** HashMap
-                                    // to thread_pool.
+                                    // to the fact that right now TCP read_stream is **not** behind
+                                    // Arc<Mutex> so that it could be sent to other threads.
+                                    match serde_json::from_slice(&packet_buffer).unwrap() {
+                                        InPacket::Message(m) => {
+                                            let handler = Arc::clone(
+                                                handlers.lock().unwrap().get(&m.address).unwrap(),
+                                            );
+                                            thread_pool.execute(move || {
+                                                handler(m.body.clone().unwrap());
+                                            });
+                                        }
+                                        InPacket::Error(m) => eprintln!("{m:?}"),
+                                        InPacket::Pong => println!("PONG"),
+                                    }
+
                                     let msg: InPacket =
                                         serde_json::from_slice(&packet_buffer).unwrap();
                                     if let InPacket::Message(m) = msg {
@@ -138,8 +176,8 @@ impl EventBusClient {
     /// the TCP connection. This makes the thread pool that reads the __read_stream__ fail and
     /// break out from the infinite loop.
     pub fn stop_listening(&mut self) {
-        if self.state == ClientState::Listening {
-            self.state = ClientState::Stopped;
+        if let ClientState::Listening = &mut self.state {
+            *&mut self.state = ClientState::Stopped;
 
             // IMPORTANT:
             // Care here. Right now this function closes the both read and write half of the TCP
@@ -194,7 +232,7 @@ pub enum InPacket {
 
 /// Struct representing the Event Bus message content.
 #[derive(Serialize, Deserialize, Debug, PartialEq)]
-struct Message {
+pub struct Message {
     address: String,
     body: Option<Value>,
     headers: Option<HashMap<String, String>>,
@@ -247,4 +285,9 @@ mod tests {
         buf.put(JSON_PONG.as_bytes());
         assert_eq!(b"\0\0\0\x0f{\"type\":\"pong\"}"[..], buf);
     }
+
+    // TODO:
+    // test for invalid content length
+    // test for not matching content length and content
+    // test for server goes down and up again / some sort of pingin mechanism may be needed
 }
